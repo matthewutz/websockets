@@ -44,17 +44,26 @@ function initScene() {
     // Enable proper face culling
     renderer.setClearColor(0x1a1a1a, 1);
     
-    // Lighting
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    // Lighting - enhanced for better visibility of modified vertices
+    // Higher ambient light reduces harsh shadows on deformed surfaces
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
     scene.add(ambientLight);
     
-    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    // Hemisphere light for more natural, even lighting
+    const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+    scene.add(hemisphereLight);
+    
+    // Main directional light
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.7);
     directionalLight.position.set(5, 5, 5);
+    directionalLight.castShadow = false;
     scene.add(directionalLight);
     
-    const pointLight = new THREE.PointLight(0xffffff, 0.5);
-    pointLight.position.set(-5, -5, -5);
-    scene.add(pointLight);
+    // Additional directional light from opposite side to reduce dark areas
+    const directionalLight2 = new THREE.DirectionalLight(0xffffff, 0.4);
+    directionalLight2.position.set(-5, 3, -5);
+    directionalLight2.castShadow = false;
+    scene.add(directionalLight2);
     
     // Raycaster for mouse interaction
     raycaster = new THREE.Raycaster();
@@ -138,7 +147,10 @@ function createDefaultClay() {
         transparent: false, // Ensure no transparency
         opacity: 1.0,
         depthWrite: true,
-        depthTest: true
+        depthTest: true,
+        // Add slight emissive component to prevent pure black shadows
+        emissive: 0x1a1a1a,
+        emissiveIntensity: 0.1
     });
     
     if (clayMesh) {
@@ -188,7 +200,10 @@ function updateClayFromState(clayState) {
             transparent: false, // Ensure no transparency
             opacity: 1.0,
             depthWrite: true,
-            depthTest: true
+            depthTest: true,
+            // Add slight emissive component to prevent pure black shadows
+            emissive: 0x1a1a1a,
+            emissiveIntensity: 0.1
         });
         clayMesh = new THREE.Mesh(geometry, material);
         scene.add(clayMesh);
