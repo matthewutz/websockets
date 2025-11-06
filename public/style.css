@@ -1,0 +1,123 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    overflow: hidden;
+    background: #1a1a1a;
+    color: #fff;
+}
+
+#container {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    position: relative;
+}
+
+#ui {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    z-index: 100;
+    background: rgba(0, 0, 0, 0.8);
+    padding: 20px;
+    border-radius: 10px;
+    backdrop-filter: blur(10px);
+    max-width: 350px;
+}
+
+#info h1 {
+    font-size: 24px;
+    margin-bottom: 10px;
+    color: #4a9eff;
+}
+
+#info p {
+    font-size: 14px;
+    margin-bottom: 20px;
+    color: #ccc;
+    line-height: 1.5;
+}
+
+#session-info {
+    margin-bottom: 15px;
+}
+
+#session-info label {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 14px;
+    color: #aaa;
+}
+
+#session-id {
+    width: 100%;
+    padding: 8px;
+    margin-bottom: 10px;
+    background: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: 5px;
+    color: #fff;
+    font-size: 14px;
+}
+
+#session-id:focus {
+    outline: none;
+    border-color: #4a9eff;
+}
+
+button {
+    padding: 8px 16px;
+    margin-right: 10px;
+    margin-bottom: 10px;
+    background: #4a9eff;
+    border: none;
+    border-radius: 5px;
+    color: #fff;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background 0.3s;
+}
+
+button:hover {
+    background: #3a8eef;
+}
+
+button:active {
+    background: #2a7edf;
+}
+
+#reset-btn {
+    background: #ff6b6b;
+}
+
+#reset-btn:hover {
+    background: #ee5a5a;
+}
+
+#users-count {
+    font-size: 14px;
+    color: #aaa;
+}
+
+#count {
+    color: #4a9eff;
+    font-weight: bold;
+}
+
+#canvas-container {
+    flex: 1;
+    width: 100%;
+    height: 100%;
+}
+
+#canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+

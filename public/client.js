@@ -1,0 +1,412 @@
+// Initialize Socket.IO
+const socket = io();
+let currentSessionId = 'default-session';
+let isConnected = false;
+let userCount = 1;
+
+// Three.js setup
+let scene, camera, renderer, clayMesh, raycaster, mouse;
+let isSculpting = false;
+let isRotating = false;
+let currentVertexIndex = null;
+const sculptRadius = 0.1;
+const sculptStrength = 0.05;
+
+// Camera rotation
+let cameraAngleX = 0;
+let cameraAngleY = 0;
+let lastMouseX = 0;
+let lastMouseY = 0;
+let cameraDistance = 5;
+
+// Initialize Three.js scene
+function initScene() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1a1a1a);
+    
+    camera = new THREE.PerspectiveCamera(
+        75,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        1000
+    );
+    camera.position.set(0, 0, 5);
+    
+    renderer = new THREE.WebGLRenderer({ 
+        canvas: document.getElementById('canvas'),
+        antialias: true 
+    });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+    
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(5, 5, 5);
+    scene.add(directionalLight);
+    
+    const pointLight = new THREE.PointLight(0xffffff, 0.5);
+    pointLight.position.set(-5, -5, -5);
+    scene.add(pointLight);
+    
+    // Raycaster for mouse interaction
+    raycaster = new THREE.Raycaster();
+    mouse = new THREE.Vector2();
+    
+    // Create default clay (will be replaced by server state)
+    createDefaultClay();
+    
+    // Update camera position based on angles
+    updateCameraPosition();
+    
+    // Event listeners
+    window.addEventListener('resize', onWindowResize);
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mousedown', onMouseDown);
+    document.addEventListener('mouseup', onMouseUp);
+    document.addEventListener('wheel', onMouseWheel, { passive: false });
+    
+    // Prevent context menu on right click (for better UX)
+    document.addEventListener('contextmenu', (e) => e.preventDefault());
+    
+    animate();
+}
+
+// Create default clay mesh
+function createDefaultClay() {
+    const geometry = new THREE.BufferGeometry();
+    const radius = 1;
+    const segments = 32;
+    
+    const vertices = [];
+    const indices = [];
+    const normals = [];
+    
+    // Generate sphere vertices
+    for (let i = 0; i <= segments; i++) {
+        const theta = (i * Math.PI) / segments;
+        const sinTheta = Math.sin(theta);
+        const cosTheta = Math.cos(theta);
+        
+        for (let j = 0; j <= segments; j++) {
+            const phi = (j * 2 * Math.PI) / segments;
+            const sinPhi = Math.sin(phi);
+            const cosPhi = Math.cos(phi);
+            
+            const x = radius * sinTheta * cosPhi;
+            const y = radius * cosTheta;
+            const z = radius * sinTheta * sinPhi;
+            
+            vertices.push(x, y, z);
+            normals.push(sinTheta * cosPhi, cosTheta, sinTheta * sinPhi);
+        }
+    }
+    
+    // Generate indices
+    for (let i = 0; i < segments; i++) {
+        for (let j = 0; j < segments; j++) {
+            const a = i * (segments + 1) + j;
+            const b = a + segments + 1;
+            
+            indices.push(a, b, a + 1);
+            indices.push(b, b + 1, a + 1);
+        }
+    }
+    
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setIndex(indices);
+    geometry.computeVertexNormals();
+    
+    const material = new THREE.MeshStandardMaterial({
+        color: 0xcc9966,
+        roughness: 0.7,
+        metalness: 0.1
+    });
+    
+    if (clayMesh) {
+        scene.remove(clayMesh);
+        clayMesh.geometry.dispose();
+    }
+    
+    clayMesh = new THREE.Mesh(geometry, material);
+    scene.add(clayMesh);
+}
+
+// Update clay mesh from server state
+function updateClayFromState(clayState) {
+    if (!clayState || !clayState.vertices) return;
+    
+    const geometry = new THREE.BufferGeometry();
+    const vertices = [];
+    const indices = clayState.indices || [];
+    
+    // Convert vertices array to flat array
+    for (const vertex of clayState.vertices) {
+        vertices.push(vertex.x, vertex.y, vertex.z);
+    }
+    
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    if (indices.length > 0) {
+        geometry.setIndex(indices);
+    }
+    geometry.computeVertexNormals();
+    
+    if (!clayMesh) {
+        const material = new THREE.MeshStandardMaterial({
+            color: new THREE.Color(
+                clayState.color?.r || 0.8,
+                clayState.color?.g || 0.6,
+                clayState.color?.b || 0.4
+            ),
+            roughness: 0.7,
+            metalness: 0.1
+        });
+        clayMesh = new THREE.Mesh(geometry, material);
+        scene.add(clayMesh);
+    } else {
+        clayMesh.geometry.dispose();
+        clayMesh.geometry = geometry;
+    }
+}
+
+// Sculpt the clay at a point
+function sculptAtPoint(point, direction, strength) {
+    if (!clayMesh) return;
+    
+    const positionAttribute = clayMesh.geometry.attributes.position;
+    const positions = positionAttribute.array;
+    const vertices = [];
+    
+    // Convert flat array to vertex objects
+    for (let i = 0; i < positions.length; i += 3) {
+        vertices.push({
+            index: i / 3,
+            x: positions[i],
+            y: positions[i + 1],
+            z: positions[i + 2]
+        });
+    }
+    
+    // Find vertices within sculpt radius
+    const affectedVertices = [];
+    for (const vertex of vertices) {
+        const vertexPos = new THREE.Vector3(vertex.x, vertex.y, vertex.z);
+        const distance = vertexPos.distanceTo(point);
+        
+        if (distance < sculptRadius) {
+            const influence = 1 - (distance / sculptRadius);
+            affectedVertices.push({
+                index: vertex.index,
+                vertex: vertex,
+                influence: influence
+            });
+        }
+    }
+    
+    // Update vertices
+    for (const affected of affectedVertices) {
+        const pushStrength = strength * affected.influence;
+        const newX = affected.vertex.x + direction.x * pushStrength;
+        const newY = affected.vertex.y + direction.y * pushStrength;
+        const newZ = affected.vertex.z + direction.z * pushStrength;
+        
+        // Update position array
+        const idx = affected.index * 3;
+        positions[idx] = newX;
+        positions[idx + 1] = newY;
+        positions[idx + 2] = newZ;
+        
+        // Emit change to server
+        socket.emit('sculpt-change', {
+            sessionId: currentSessionId,
+            vertexIndex: affected.index,
+            position: { x: newX, y: newY, z: newZ }
+        });
+    }
+    
+    positionAttribute.needsUpdate = true;
+    clayMesh.geometry.computeVertexNormals();
+}
+
+// Update camera position based on rotation angles
+function updateCameraPosition() {
+    const x = Math.sin(cameraAngleY) * Math.cos(cameraAngleX) * cameraDistance;
+    const y = Math.sin(cameraAngleX) * cameraDistance;
+    const z = Math.cos(cameraAngleY) * Math.cos(cameraAngleX) * cameraDistance;
+    
+    camera.position.set(x, y, z);
+    camera.lookAt(0, 0, 0);
+}
+
+// Mouse event handlers
+function onMouseMove(event) {
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    
+    // Handle camera rotation (right mouse button or middle mouse button)
+    if ((event.buttons === 2 || event.buttons === 4) && !isSculpting) {
+        const deltaX = event.clientX - lastMouseX;
+        const deltaY = event.clientY - lastMouseY;
+        
+        cameraAngleY -= deltaX * 0.01;
+        cameraAngleX -= deltaY * 0.01;
+        
+        // Limit vertical rotation
+        cameraAngleX = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, cameraAngleX));
+        
+        updateCameraPosition();
+        isRotating = true;
+    } else if (isSculpting && clayMesh) {
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObject(clayMesh);
+        
+        if (intersects.length > 0) {
+            const intersect = intersects[0];
+            const normal = intersect.face.normal.clone();
+            normal.transformDirection(clayMesh.matrixWorld);
+            
+            // Determine push or pull based on mouse movement
+            const strength = event.shiftKey ? -sculptStrength : sculptStrength;
+            sculptAtPoint(intersect.point, normal, strength);
+        }
+    }
+    
+    lastMouseX = event.clientX;
+    lastMouseY = event.clientY;
+}
+
+function onMouseWheel(event) {
+    event.preventDefault();
+    const zoomSpeed = 0.5;
+    const newDistance = cameraDistance + (event.deltaY > 0 ? zoomSpeed : -zoomSpeed);
+    
+    if (newDistance >= 2 && newDistance <= 10) {
+        cameraDistance = newDistance;
+        updateCameraPosition();
+    }
+}
+
+function onMouseDown(event) {
+    if (!isConnected) return;
+    
+    // Right mouse button or middle mouse button for rotation
+    if (event.button === 2 || event.button === 1) {
+        isRotating = true;
+        lastMouseX = event.clientX;
+        lastMouseY = event.clientY;
+        document.body.style.cursor = 'grabbing';
+        return;
+    }
+    
+    // Left mouse button for sculpting
+    if (event.button !== 0) return;
+    
+    raycaster.setFromCamera(mouse, camera);
+    const intersects = raycaster.intersectObject(clayMesh);
+    
+    if (intersects.length > 0) {
+        isSculpting = true;
+        document.body.style.cursor = 'grabbing';
+    }
+}
+
+function onMouseUp(event) {
+    isSculpting = false;
+    isRotating = false;
+    document.body.style.cursor = 'default';
+}
+
+function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+// Animation loop
+function animate() {
+    requestAnimationFrame(animate);
+    renderer.render(scene, camera);
+}
+
+// Socket.IO event handlers
+socket.on('connect', () => {
+    console.log('Connected to server');
+    isConnected = true;
+    joinSession();
+});
+
+socket.on('disconnect', () => {
+    console.log('Disconnected from server');
+    isConnected = false;
+});
+
+socket.on('clay-state', (clayState) => {
+    console.log('Received clay state from server');
+    updateClayFromState(clayState);
+});
+
+socket.on('vertex-update', (data) => {
+    if (!clayMesh) return;
+    
+    const { vertexIndex, position } = data;
+    const positionAttribute = clayMesh.geometry.attributes.position;
+    const positions = positionAttribute.array;
+    
+    if (vertexIndex * 3 < positions.length) {
+        positions[vertexIndex * 3] = position.x;
+        positions[vertexIndex * 3 + 1] = position.y;
+        positions[vertexIndex * 3 + 2] = position.z;
+        
+        positionAttribute.needsUpdate = true;
+        clayMesh.geometry.computeVertexNormals();
+    }
+});
+
+socket.on('user-joined', (userId) => {
+    console.log('User joined:', userId);
+    userCount++;
+    updateUserCount();
+});
+
+// UI event handlers
+document.getElementById('join-btn').addEventListener('click', () => {
+    const sessionId = document.getElementById('session-id').value.trim();
+    if (sessionId) {
+        currentSessionId = sessionId;
+        joinSession();
+    }
+});
+
+document.getElementById('reset-btn').addEventListener('click', async () => {
+    if (confirm('Reset the clay to default shape?')) {
+        try {
+            const response = await fetch(`/api/session/${currentSessionId}/reset`, {
+                method: 'POST'
+            });
+            if (response.ok) {
+                console.log('Clay reset');
+            }
+        } catch (error) {
+            console.error('Error resetting clay:', error);
+        }
+    }
+});
+
+function joinSession() {
+    if (isConnected) {
+        socket.emit('join-session', currentSessionId);
+    }
+}
+
+function updateUserCount() {
+    document.getElementById('count').textContent = userCount;
+}
+
+// Initialize on load
+window.addEventListener('load', () => {
+    initScene();
+});
+
