@@ -138,7 +138,6 @@ function createDefaultClay() {
     geometry.setIndex(indices);
     // Compute vertex normals (will overwrite the manually set normals)
     geometry.computeVertexNormals();
-    // Ensure normals point outward
     geometry.normalizeNormals();
     
     const material = new THREE.MeshStandardMaterial({
@@ -172,7 +171,8 @@ function createDefaultClay() {
     // Set render order to prevent z-fighting with tool indicator
     clayMesh.renderOrder = 0;
     scene.add(clayMesh);
-    
+    // Ensure normals point outward after creating mesh
+    ensureOutwardNormals();
 }
 
 // Create visual indicator for tool area of effect
@@ -238,6 +238,8 @@ function updateClayFromState(clayState) {
         });
         clayMesh = new THREE.Mesh(geometry, material);
         scene.add(clayMesh);
+        // Ensure normals point outward after creating mesh
+        ensureOutwardNormals();
     } else {
         const oldMaterial = clayMesh.material;
         clayMesh.geometry.dispose();
@@ -248,6 +250,8 @@ function updateClayFromState(clayState) {
             oldMaterial.polygonOffsetFactor = 1;
             oldMaterial.polygonOffsetUnits = 1;
         }
+        // Ensure normals point outward after updating geometry
+        ensureOutwardNormals();
     }
 }
 
@@ -320,13 +324,54 @@ function sculptAtPoint(point, direction, strength) {
     positionAttribute.needsUpdate = true;
     // Recompute normals with proper settings for deformed geometry
     clayMesh.geometry.computeVertexNormals();
-    clayMesh.geometry.normalizeNormals();
+    // Ensure normals point outward from center (fixes lighting issues with overlapping geometry)
+    ensureOutwardNormals();
     // Ensure normal attribute is marked for update
     if (clayMesh.geometry.attributes.normal) {
         clayMesh.geometry.attributes.normal.needsUpdate = true;
     }
     // Force geometry update
     clayMesh.geometry.computeBoundingSphere();
+}
+
+// Ensure normals point outward from center to fix lighting issues
+function ensureOutwardNormals() {
+    if (!clayMesh || !clayMesh.geometry.attributes.normal) return;
+    
+    const positionAttribute = clayMesh.geometry.attributes.position;
+    const normalAttribute = clayMesh.geometry.attributes.normal;
+    const positions = positionAttribute.array;
+    const normals = normalAttribute.array;
+    const center = new THREE.Vector3(0, 0, 0);
+    
+    // For each vertex, ensure normal points outward from center
+    for (let i = 0; i < positions.length; i += 3) {
+        const vertexPos = new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2]);
+        const currentNormal = new THREE.Vector3(normals[i], normals[i + 1], normals[i + 2]);
+        
+        // Calculate radial direction (from center to vertex)
+        const radialDir = vertexPos.clone().sub(center).normalize();
+        
+        // Check if current normal points in similar direction to radial
+        const dot = currentNormal.dot(radialDir);
+        
+        // If normal points inward (dot < 0), flip it or use radial direction
+        if (dot < 0) {
+            // Use radial direction as normal (ensures outward pointing)
+            normals[i] = radialDir.x;
+            normals[i + 1] = radialDir.y;
+            normals[i + 2] = radialDir.z;
+        } else {
+            // Blend between computed normal and radial to ensure it points outward
+            // This preserves surface detail while ensuring correct direction
+            const blended = currentNormal.clone().lerp(radialDir, 0.3).normalize();
+            normals[i] = blended.x;
+            normals[i + 1] = blended.y;
+            normals[i + 2] = blended.z;
+        }
+    }
+    
+    normalAttribute.needsUpdate = true;
 }
 
 // Smooth tool - averages nearby vertices using Laplacian smoothing
@@ -392,7 +437,8 @@ function smoothVertices(affectedVertices, allVertices) {
     if (updates.length > 0) {
         // Recompute normals with proper settings
         clayMesh.geometry.computeVertexNormals();
-        clayMesh.geometry.normalizeNormals();
+        // Ensure normals point outward from center
+        ensureOutwardNormals();
         if (clayMesh.geometry.attributes.normal) {
             clayMesh.geometry.attributes.normal.needsUpdate = true;
         }
@@ -552,7 +598,8 @@ socket.on('vertex-update', (data) => {
         positionAttribute.needsUpdate = true;
         // Recompute normals properly
         clayMesh.geometry.computeVertexNormals();
-        clayMesh.geometry.normalizeNormals();
+        // Ensure normals point outward from center
+        ensureOutwardNormals();
         if (clayMesh.geometry.attributes.normal) {
             clayMesh.geometry.attributes.normal.needsUpdate = true;
         }
@@ -578,7 +625,8 @@ socket.on('vertex-batch-update', (data) => {
     positionAttribute.needsUpdate = true;
     // Recompute normals properly
     clayMesh.geometry.computeVertexNormals();
-    clayMesh.geometry.normalizeNormals();
+    // Ensure normals point outward from center
+    ensureOutwardNormals();
     if (clayMesh.geometry.attributes.normal) {
         clayMesh.geometry.attributes.normal.needsUpdate = true;
     }
