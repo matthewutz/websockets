@@ -123,16 +123,22 @@ function createDefaultClay() {
     }
     
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
     geometry.setIndex(indices);
+    // Compute vertex normals (will overwrite the manually set normals)
     geometry.computeVertexNormals();
+    // Ensure normals point outward
+    geometry.normalizeNormals();
     
     const material = new THREE.MeshStandardMaterial({
         color: 0x808080, // Grey color
         roughness: 0.7,
         metalness: 0.1,
         side: THREE.FrontSide, // Only render front faces
-        flatShading: false
+        flatShading: false,
+        transparent: false, // Ensure no transparency
+        opacity: 1.0,
+        depthWrite: true,
+        depthTest: true
     });
     
     if (clayMesh) {
@@ -164,7 +170,9 @@ function updateClayFromState(clayState) {
     if (indices.length > 0) {
         geometry.setIndex(indices);
     }
+    // Compute vertex normals and ensure they're normalized
     geometry.computeVertexNormals();
+    geometry.normalizeNormals();
     
     if (!clayMesh) {
         const material = new THREE.MeshStandardMaterial({
@@ -176,7 +184,11 @@ function updateClayFromState(clayState) {
             roughness: 0.7,
             metalness: 0.1,
             side: THREE.FrontSide, // Only render front faces
-            flatShading: false
+            flatShading: false,
+            transparent: false, // Ensure no transparency
+            opacity: 1.0,
+            depthWrite: true,
+            depthTest: true
         });
         clayMesh = new THREE.Mesh(geometry, material);
         scene.add(clayMesh);
@@ -253,7 +265,15 @@ function sculptAtPoint(point, direction, strength) {
     }
     
     positionAttribute.needsUpdate = true;
+    // Recompute normals with proper settings for deformed geometry
     clayMesh.geometry.computeVertexNormals();
+    clayMesh.geometry.normalizeNormals();
+    // Ensure normal attribute is marked for update
+    if (clayMesh.geometry.attributes.normal) {
+        clayMesh.geometry.attributes.normal.needsUpdate = true;
+    }
+    // Force geometry update
+    clayMesh.geometry.computeBoundingSphere();
 }
 
 // Smooth tool - averages nearby vertices using Laplacian smoothing
@@ -314,8 +334,18 @@ function smoothVertices(affectedVertices, allVertices) {
         }
     }
     
-    // Emit all updates for smooth tool (batch update)
+    // Update geometry after smoothing
+    positionAttribute.needsUpdate = true;
     if (updates.length > 0) {
+        // Recompute normals with proper settings
+        clayMesh.geometry.computeVertexNormals();
+        clayMesh.geometry.normalizeNormals();
+        if (clayMesh.geometry.attributes.normal) {
+            clayMesh.geometry.attributes.normal.needsUpdate = true;
+        }
+        clayMesh.geometry.computeBoundingSphere();
+        
+        // Emit all updates for smooth tool (batch update)
         socket.emit('sculpt-batch', {
             sessionId: currentSessionId,
             updates: updates
@@ -454,7 +484,13 @@ socket.on('vertex-update', (data) => {
         positions[vertexIndex * 3 + 2] = position.z;
         
         positionAttribute.needsUpdate = true;
+        // Recompute normals properly
         clayMesh.geometry.computeVertexNormals();
+        clayMesh.geometry.normalizeNormals();
+        if (clayMesh.geometry.attributes.normal) {
+            clayMesh.geometry.attributes.normal.needsUpdate = true;
+        }
+        clayMesh.geometry.computeBoundingSphere();
     }
 });
 
@@ -474,7 +510,13 @@ socket.on('vertex-batch-update', (data) => {
     }
     
     positionAttribute.needsUpdate = true;
+    // Recompute normals properly
     clayMesh.geometry.computeVertexNormals();
+    clayMesh.geometry.normalizeNormals();
+    if (clayMesh.geometry.attributes.normal) {
+        clayMesh.geometry.attributes.normal.needsUpdate = true;
+    }
+    clayMesh.geometry.computeBoundingSphere();
 });
 
 socket.on('user-joined', (userId) => {
