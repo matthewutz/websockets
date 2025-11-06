@@ -192,6 +192,39 @@ io.on('connection', (socket) => {
     }
   });
   
+  socket.on('sculpt-batch', async (data) => {
+    const { sessionId, updates } = data;
+    
+    if (!sessionId || !updates || !Array.isArray(updates)) {
+      return;
+    }
+    
+    const session = activeSessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+    
+    // Update all vertices in the batch
+    for (const update of updates) {
+      const { vertexIndex, position } = update;
+      if (session.clayState.vertices[vertexIndex] && position) {
+        session.clayState.vertices[vertexIndex] = position;
+      }
+    }
+    
+    // Broadcast batch update to all other users in the session
+    socket.to(sessionId).emit('vertex-batch-update', {
+      updates: updates
+    });
+    
+    // Save to database periodically
+    const now = Date.now();
+    if (now - session.lastSave > 2000) {
+      await updateClayState(sessionId, session.clayState);
+      session.lastSave = now;
+    }
+  });
+  
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
   });
@@ -215,18 +248,22 @@ app.post('/api/session/:sessionId/reset', async (req, res) => {
     const { sessionId } = req.params;
     const defaultState = createDefaultClay();
     
+    // Update or insert the session in database
     await pool.query(
-      'UPDATE clay_sessions SET clay_data = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2',
-      [JSON.stringify(defaultState), sessionId]
+      `INSERT INTO clay_sessions (session_id, clay_data, updated_at) 
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (session_id) 
+       DO UPDATE SET clay_data = $2, updated_at = CURRENT_TIMESTAMP`,
+      [sessionId, JSON.stringify(defaultState)]
     );
     
-    if (activeSessions.has(sessionId)) {
-      activeSessions.set(sessionId, {
-        clayState: defaultState,
-        lastSave: Date.now()
-      });
-    }
+    // Always update active session (create if doesn't exist)
+    activeSessions.set(sessionId, {
+      clayState: defaultState,
+      lastSave: Date.now()
+    });
     
+    // Broadcast reset to all users in the session
     io.to(sessionId).emit('clay-state', defaultState);
     
     res.json({ success: true });

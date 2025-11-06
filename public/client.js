@@ -12,6 +12,9 @@ let currentVertexIndex = null;
 const sculptRadius = 0.1;
 const sculptStrength = 0.05;
 
+// Tool selection
+let currentTool = 'add'; // 'add', 'subtract', 'smooth'
+
 // Camera rotation
 let cameraAngleX = 0;
 let cameraAngleY = 0;
@@ -201,34 +204,105 @@ function sculptAtPoint(point, direction, strength) {
             affectedVertices.push({
                 index: vertex.index,
                 vertex: vertex,
-                influence: influence
+                influence: influence,
+                distance: distance
             });
         }
     }
     
-    // Update vertices
-    for (const affected of affectedVertices) {
-        const pushStrength = strength * affected.influence;
-        const newX = affected.vertex.x + direction.x * pushStrength;
-        const newY = affected.vertex.y + direction.y * pushStrength;
-        const newZ = affected.vertex.z + direction.z * pushStrength;
+    // Handle different tools
+    if (currentTool === 'smooth') {
+        smoothVertices(affectedVertices, vertices);
+    } else {
+        // Add or Subtract
+        const toolStrength = currentTool === 'add' ? strength : -strength;
         
-        // Update position array
-        const idx = affected.index * 3;
-        positions[idx] = newX;
-        positions[idx + 1] = newY;
-        positions[idx + 2] = newZ;
-        
-        // Emit change to server
-        socket.emit('sculpt-change', {
-            sessionId: currentSessionId,
-            vertexIndex: affected.index,
-            position: { x: newX, y: newY, z: newZ }
-        });
+        for (const affected of affectedVertices) {
+            const pushStrength = toolStrength * affected.influence;
+            const newX = affected.vertex.x + direction.x * pushStrength;
+            const newY = affected.vertex.y + direction.y * pushStrength;
+            const newZ = affected.vertex.z + direction.z * pushStrength;
+            
+            // Update position array
+            const idx = affected.index * 3;
+            positions[idx] = newX;
+            positions[idx + 1] = newY;
+            positions[idx + 2] = newZ;
+            
+            // Emit change to server
+            socket.emit('sculpt-change', {
+                sessionId: currentSessionId,
+                vertexIndex: affected.index,
+                position: { x: newX, y: newY, z: newZ }
+            });
+        }
     }
     
     positionAttribute.needsUpdate = true;
     clayMesh.geometry.computeVertexNormals();
+}
+
+// Smooth tool - averages nearby vertices
+function smoothVertices(affectedVertices, allVertices) {
+    if (!clayMesh) return;
+    
+    const positionAttribute = clayMesh.geometry.attributes.position;
+    const positions = positionAttribute.array;
+    const smoothRadius = sculptRadius * 1.5; // Larger radius for smoothing
+    const updates = [];
+    
+    for (const affected of affectedVertices) {
+        const vertexPos = new THREE.Vector3(affected.vertex.x, affected.vertex.y, affected.vertex.z);
+        let sumX = 0, sumY = 0, sumZ = 0;
+        let count = 0;
+        let totalWeight = 0;
+        
+        // Find all nearby vertices for averaging
+        for (const vertex of allVertices) {
+            const otherPos = new THREE.Vector3(vertex.x, vertex.y, vertex.z);
+            const distance = vertexPos.distanceTo(otherPos);
+            
+            if (distance < smoothRadius && distance > 0) {
+                const weight = 1 - (distance / smoothRadius);
+                sumX += vertex.x * weight;
+                sumY += vertex.y * weight;
+                sumZ += vertex.z * weight;
+                totalWeight += weight;
+                count++;
+            }
+        }
+        
+        if (count > 0 && totalWeight > 0) {
+            // Blend between current position and averaged position
+            const blendFactor = affected.influence * 0.3; // Smoothing strength
+            const avgX = sumX / totalWeight;
+            const avgY = sumY / totalWeight;
+            const avgZ = sumZ / totalWeight;
+            
+            const newX = affected.vertex.x * (1 - blendFactor) + avgX * blendFactor;
+            const newY = affected.vertex.y * (1 - blendFactor) + avgY * blendFactor;
+            const newZ = affected.vertex.z * (1 - blendFactor) + avgZ * blendFactor;
+            
+            // Update position array
+            const idx = affected.index * 3;
+            positions[idx] = newX;
+            positions[idx + 1] = newY;
+            positions[idx + 2] = newZ;
+            
+            updates.push({
+                vertexIndex: affected.index,
+                position: { x: newX, y: newY, z: newZ }
+            });
+        }
+    }
+    
+    // Emit all updates for smooth tool (batch update)
+    if (updates.length > 0) {
+        socket.emit('sculpt-batch', {
+            sessionId: currentSessionId,
+            updates: updates
+        });
+    }
 }
 
 // Update camera position based on rotation angles
@@ -268,9 +342,8 @@ function onMouseMove(event) {
             const normal = intersect.face.normal.clone();
             normal.transformDirection(clayMesh.matrixWorld);
             
-            // Determine push or pull based on mouse movement
-            const strength = event.shiftKey ? -sculptStrength : sculptStrength;
-            sculptAtPoint(intersect.point, normal, strength);
+            // Use the selected tool (add/subtract/smooth)
+            sculptAtPoint(intersect.point, normal, sculptStrength);
         }
     }
     
@@ -365,6 +438,25 @@ socket.on('vertex-update', (data) => {
     }
 });
 
+socket.on('vertex-batch-update', (data) => {
+    if (!clayMesh || !data.updates) return;
+    
+    const positionAttribute = clayMesh.geometry.attributes.position;
+    const positions = positionAttribute.array;
+    
+    for (const update of data.updates) {
+        const { vertexIndex, position } = update;
+        if (vertexIndex * 3 < positions.length && position) {
+            positions[vertexIndex * 3] = position.x;
+            positions[vertexIndex * 3 + 1] = position.y;
+            positions[vertexIndex * 3 + 2] = position.z;
+        }
+    }
+    
+    positionAttribute.needsUpdate = true;
+    clayMesh.geometry.computeVertexNormals();
+});
+
 socket.on('user-joined', (userId) => {
     console.log('User joined:', userId);
     userCount++;
@@ -387,12 +479,30 @@ document.getElementById('reset-btn').addEventListener('click', async () => {
                 method: 'POST'
             });
             if (response.ok) {
-                console.log('Clay reset');
+                console.log('Clay reset - waiting for server state update');
+                // The server will emit 'clay-state' which will trigger updateClayFromState
+            } else {
+                console.error('Failed to reset clay');
+                alert('Failed to reset clay. Please try again.');
             }
         } catch (error) {
             console.error('Error resetting clay:', error);
+            alert('Error resetting clay: ' + error.message);
         }
     }
+});
+
+// Tool selection handlers
+document.querySelectorAll('.tool-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        // Remove active class from all buttons
+        document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+        // Add active class to clicked button
+        btn.classList.add('active');
+        // Update current tool
+        currentTool = btn.getAttribute('data-tool');
+        console.log('Tool changed to:', currentTool);
+    });
 });
 
 function joinSession() {

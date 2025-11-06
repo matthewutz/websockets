@@ -11,12 +11,20 @@
         <div id="ui">
             <div id="info">
                 <h1>3D Collaborative Sculpting</h1>
-                <p><strong>Left-click and drag</strong> to sculpt. <strong>Right-click and drag</strong> to rotate view. <strong>Scroll</strong> to zoom. <strong>Shift + drag</strong> to pull instead of push.</p>
+                <p><strong>Left-click and drag</strong> to sculpt with selected tool. <strong>Right-click and drag</strong> to rotate view. <strong>Scroll</strong> to zoom. Select <strong>Add</strong>, <strong>Subtract</strong>, or <strong>Smooth</strong> tool above.</p>
                 <div id="session-info">
                     <label for="session-id">Session ID:</label>
                     <input type="text" id="session-id" value="default-session" />
                     <button id="join-btn">Join Session</button>
                     <button id="reset-btn">Reset Clay</button>
+                </div>
+                <div id="tool-selection">
+                    <label>Tool:</label>
+                    <div id="tools">
+                        <button class="tool-btn active" data-tool="add" title="Add - Push outward">Add</button>
+                        <button class="tool-btn" data-tool="subtract" title="Subtract - Pull inward">Subtract</button>
+                        <button class="tool-btn" data-tool="smooth" title="Smooth - Average nearby vertices">Smooth</button>
+                    </div>
                 </div>
                 <div id="users-count">Users online: <span id="count">1</span></div>
             </div>

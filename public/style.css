@@ -99,6 +99,47 @@ button:active {
     background: #ee5a5a;
 }
 
+#tool-selection {
+    margin-bottom: 15px;
+}
+
+#tool-selection label {
+    display: block;
+    margin-bottom: 8px;
+    font-size: 14px;
+    color: #aaa;
+}
+
+#tools {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.tool-btn {
+    flex: 1;
+    min-width: 80px;
+    padding: 8px 12px;
+    background: #2a2a2a;
+    border: 2px solid #444;
+    border-radius: 5px;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.3s;
+}
+
+.tool-btn:hover {
+    background: #3a3a3a;
+    border-color: #555;
+}
+
+.tool-btn.active {
+    background: #4a9eff;
+    border-color: #4a9eff;
+    color: #fff;
+}
+
 #users-count {
     font-size: 14px;
     color: #aaa;
