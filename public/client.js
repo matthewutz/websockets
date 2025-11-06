@@ -374,13 +374,13 @@ function ensureOutwardNormals() {
     normalAttribute.needsUpdate = true;
 }
 
-// Smooth tool - averages nearby vertices using Laplacian smoothing
+// Smooth tool - brings nearby vertices closer together using Laplacian smoothing
 function smoothVertices(affectedVertices, allVertices) {
     if (!clayMesh) return;
     
     const positionAttribute = clayMesh.geometry.attributes.position;
     const positions = positionAttribute.array;
-    const smoothRadius = sculptRadius * 2.0; // Larger radius for better smoothing
+    const smoothRadius = sculptRadius * 2.5; // Larger radius for better smoothing
     const updates = [];
     
     for (const affected of affectedVertices) {
@@ -389,14 +389,18 @@ function smoothVertices(affectedVertices, allVertices) {
         let count = 0;
         let totalWeight = 0;
         
-        // Find all nearby vertices for averaging (including the vertex itself for stability)
+        // Find all nearby vertices for averaging (EXCLUDE the vertex itself)
         for (const vertex of allVertices) {
+            // Skip the vertex itself - we want to move toward neighbors
+            if (vertex.index === affected.index) continue;
+            
             const otherPos = new THREE.Vector3(vertex.x, vertex.y, vertex.z);
             const distance = vertexPos.distanceTo(otherPos);
             
-            if (distance < smoothRadius) {
-                // Weight closer vertices more, but include self with full weight
-                const weight = distance === 0 ? 1.0 : (1 - (distance / smoothRadius)) * (1 - (distance / smoothRadius));
+            if (distance < smoothRadius && distance > 0) {
+                // Weight closer neighbors more heavily
+                // Use inverse distance squared for better smoothing
+                const weight = (1 - (distance / smoothRadius)) * (1 - (distance / smoothRadius));
                 sumX += vertex.x * weight;
                 sumY += vertex.y * weight;
                 sumZ += vertex.z * weight;
@@ -405,19 +409,21 @@ function smoothVertices(affectedVertices, allVertices) {
             }
         }
         
-        if (count > 1 && totalWeight > 0) { // Need at least 2 vertices (self + neighbor)
-            // Compute weighted average
+        if (count > 0 && totalWeight > 0) {
+            // Compute weighted average of neighboring vertices
             const avgX = sumX / totalWeight;
             const avgY = sumY / totalWeight;
             const avgZ = sumZ / totalWeight;
             
-            // Blend factor: stronger smoothing (0.5 to 1.0 based on influence)
-            // This makes the smoothing much more noticeable
-            const blendFactor = Math.min(1.0, 0.5 + affected.influence * 0.5);
+            // Smoothing strength: move vertex toward average of neighbors
+            // Higher influence = more smoothing
+            const smoothStrength = 0.4 + (affected.influence * 0.4); // 0.4 to 0.8
             
-            const newX = affected.vertex.x * (1 - blendFactor) + avgX * blendFactor;
-            const newY = affected.vertex.y * (1 - blendFactor) + avgY * blendFactor;
-            const newZ = affected.vertex.z * (1 - blendFactor) + avgZ * blendFactor;
+            // Move vertex toward the average position of neighbors
+            // This brings vertices closer together, reducing surface variation
+            const newX = affected.vertex.x * (1 - smoothStrength) + avgX * smoothStrength;
+            const newY = affected.vertex.y * (1 - smoothStrength) + avgY * smoothStrength;
+            const newZ = affected.vertex.z * (1 - smoothStrength) + avgZ * smoothStrength;
             
             // Update position array
             const idx = affected.index * 3;
