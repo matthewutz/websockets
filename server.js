@@ -90,7 +90,7 @@ async function updateClayState(sessionId, clayData) {
 // Create default clay (sphere geometry)
 function createDefaultClay() {
   const radius = 1;
-  const segments = 32;
+  const segments = 64; // Increased for higher polygon count
   const vertices = [];
   const indices = [];
   

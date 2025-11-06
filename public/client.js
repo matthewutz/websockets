@@ -5,12 +5,12 @@ let isConnected = false;
 let userCount = 1;
 
 // Three.js setup
-let scene, camera, renderer, clayMesh, raycaster, mouse;
+let scene, camera, renderer, clayMesh, raycaster, mouse, toolIndicator;
 let isSculpting = false;
 let isRotating = false;
 let currentVertexIndex = null;
 const sculptRadius = 0.1;
-const sculptStrength = 0.05;
+const sculptStrength = 0.2; // Increased strength for more noticeable sculpting
 
 // Tool selection
 let currentTool = 'add'; // 'add', 'subtract', 'smooth'
@@ -69,6 +69,9 @@ function initScene() {
     raycaster = new THREE.Raycaster();
     mouse = new THREE.Vector2();
     
+    // Create tool indicator (sphere showing area of effect)
+    createToolIndicator();
+    
     // Create default clay (will be replaced by server state)
     createDefaultClay();
     
@@ -92,7 +95,7 @@ function initScene() {
 function createDefaultClay() {
     const geometry = new THREE.BufferGeometry();
     const radius = 1;
-    const segments = 32;
+    const segments = 64; // Increased for higher polygon count
     
     const vertices = [];
     const indices = [];
@@ -150,7 +153,11 @@ function createDefaultClay() {
         depthTest: true,
         // Add slight emissive component to prevent pure black shadows
         emissive: 0x1a1a1a,
-        emissiveIntensity: 0.1
+        emissiveIntensity: 0.1,
+        // Fix z-fighting with overlapping geometry
+        polygonOffset: true,
+        polygonOffsetFactor: 1,
+        polygonOffsetUnits: 1
     });
     
     if (clayMesh) {
@@ -162,7 +169,27 @@ function createDefaultClay() {
     clayMesh = new THREE.Mesh(geometry, material);
     // Enable proper face culling
     clayMesh.material.needsUpdate = true;
+    // Set render order to prevent z-fighting with tool indicator
+    clayMesh.renderOrder = 0;
     scene.add(clayMesh);
+    
+}
+
+// Create visual indicator for tool area of effect
+function createToolIndicator() {
+    const indicatorGeometry = new THREE.SphereGeometry(sculptRadius, 16, 16);
+    const indicatorMaterial = new THREE.MeshBasicMaterial({
+        color: 0x4a9eff,
+        wireframe: true,
+        transparent: true,
+        opacity: 0.6,
+        depthTest: false, // Always visible
+        side: THREE.DoubleSide
+    });
+    toolIndicator = new THREE.Mesh(indicatorGeometry, indicatorMaterial);
+    toolIndicator.visible = false;
+    toolIndicator.renderOrder = 1; // Render on top
+    scene.add(toolIndicator);
 }
 
 // Update clay mesh from server state
@@ -203,13 +230,24 @@ function updateClayFromState(clayState) {
             depthTest: true,
             // Add slight emissive component to prevent pure black shadows
             emissive: 0x1a1a1a,
-            emissiveIntensity: 0.1
+            emissiveIntensity: 0.1,
+            // Fix z-fighting with overlapping geometry
+            polygonOffset: true,
+            polygonOffsetFactor: 1,
+            polygonOffsetUnits: 1
         });
         clayMesh = new THREE.Mesh(geometry, material);
         scene.add(clayMesh);
     } else {
+        const oldMaterial = clayMesh.material;
         clayMesh.geometry.dispose();
         clayMesh.geometry = geometry;
+        // Preserve material properties including polygonOffset
+        if (oldMaterial) {
+            oldMaterial.polygonOffset = true;
+            oldMaterial.polygonOffsetFactor = 1;
+            oldMaterial.polygonOffsetUnits = 1;
+        }
     }
 }
 
@@ -396,19 +434,31 @@ function onMouseMove(event) {
         
         updateCameraPosition();
         isRotating = true;
-    } else if (isSculpting && clayMesh) {
+    } else if (clayMesh) {
+        // Always update tool indicator position
         raycaster.setFromCamera(mouse, camera);
         const intersects = raycaster.intersectObject(clayMesh);
         
         if (intersects.length > 0) {
             const intersect = intersects[0];
-            // Use radial direction (from center to intersection point) for more reliable sculpting
-            // This ensures we always push/pull relative to the sphere center
-            const center = new THREE.Vector3(0, 0, 0);
-            const radialDirection = intersect.point.clone().sub(center).normalize();
             
-            // Use the selected tool (add/subtract/smooth)
-            sculptAtPoint(intersect.point, radialDirection, sculptStrength);
+            // Update tool indicator position and visibility
+            if (toolIndicator) {
+                toolIndicator.position.copy(intersect.point);
+                toolIndicator.visible = true;
+            }
+            
+            if (isSculpting) {
+                // Use radial direction (from center to intersection point) for more reliable sculpting
+                // This ensures we always push/pull relative to the sphere center
+                const center = new THREE.Vector3(0, 0, 0);
+                const radialDirection = intersect.point.clone().sub(center).normalize();
+                
+                // Use the selected tool (add/subtract/smooth)
+                sculptAtPoint(intersect.point, radialDirection, sculptStrength);
+            }
+        } else if (toolIndicator) {
+            toolIndicator.visible = false;
         }
     }
     
@@ -455,6 +505,7 @@ function onMouseUp(event) {
     isSculpting = false;
     isRotating = false;
     document.body.style.cursor = 'default';
+    // Tool indicator visibility is handled in onMouseMove
 }
 
 function onWindowResize() {
