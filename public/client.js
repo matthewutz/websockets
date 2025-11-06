@@ -41,6 +41,8 @@ function initScene() {
     });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
+    // Enable proper face culling
+    renderer.setClearColor(0x1a1a1a, 1);
     
     // Lighting
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
@@ -107,14 +109,16 @@ function createDefaultClay() {
         }
     }
     
-    // Generate indices
+    // Generate indices (ensuring correct winding order for front-facing)
     for (let i = 0; i < segments; i++) {
         for (let j = 0; j < segments; j++) {
             const a = i * (segments + 1) + j;
             const b = a + segments + 1;
             
-            indices.push(a, b, a + 1);
-            indices.push(b, b + 1, a + 1);
+            // First triangle - ensure counter-clockwise winding
+            indices.push(a, a + 1, b);
+            // Second triangle
+            indices.push(a + 1, b + 1, b);
         }
     }
     
@@ -124,17 +128,22 @@ function createDefaultClay() {
     geometry.computeVertexNormals();
     
     const material = new THREE.MeshStandardMaterial({
-        color: 0xcc9966,
+        color: 0x808080, // Grey color
         roughness: 0.7,
-        metalness: 0.1
+        metalness: 0.1,
+        side: THREE.FrontSide, // Only render front faces
+        flatShading: false
     });
     
     if (clayMesh) {
         scene.remove(clayMesh);
         clayMesh.geometry.dispose();
+        clayMesh.material.dispose();
     }
     
     clayMesh = new THREE.Mesh(geometry, material);
+    // Enable proper face culling
+    clayMesh.material.needsUpdate = true;
     scene.add(clayMesh);
 }
 
@@ -160,12 +169,14 @@ function updateClayFromState(clayState) {
     if (!clayMesh) {
         const material = new THREE.MeshStandardMaterial({
             color: new THREE.Color(
-                clayState.color?.r || 0.8,
-                clayState.color?.g || 0.6,
-                clayState.color?.b || 0.4
+                clayState.color?.r || 0.5,
+                clayState.color?.g || 0.5,
+                clayState.color?.b || 0.5
             ),
             roughness: 0.7,
-            metalness: 0.1
+            metalness: 0.1,
+            side: THREE.FrontSide, // Only render front faces
+            flatShading: false
         });
         clayMesh = new THREE.Mesh(geometry, material);
         scene.add(clayMesh);
@@ -215,10 +226,13 @@ function sculptAtPoint(point, direction, strength) {
         smoothVertices(affectedVertices, vertices);
     } else {
         // Add or Subtract
+        // Direction should now point outward (away from center)
+        // Add pushes outward (along normal), Subtract pulls inward (opposite normal)
         const toolStrength = currentTool === 'add' ? strength : -strength;
         
         for (const affected of affectedVertices) {
             const pushStrength = toolStrength * affected.influence;
+            // Move along the normal direction
             const newX = affected.vertex.x + direction.x * pushStrength;
             const newY = affected.vertex.y + direction.y * pushStrength;
             const newZ = affected.vertex.z + direction.z * pushStrength;
@@ -242,13 +256,13 @@ function sculptAtPoint(point, direction, strength) {
     clayMesh.geometry.computeVertexNormals();
 }
 
-// Smooth tool - averages nearby vertices
+// Smooth tool - averages nearby vertices using Laplacian smoothing
 function smoothVertices(affectedVertices, allVertices) {
     if (!clayMesh) return;
     
     const positionAttribute = clayMesh.geometry.attributes.position;
     const positions = positionAttribute.array;
-    const smoothRadius = sculptRadius * 1.5; // Larger radius for smoothing
+    const smoothRadius = sculptRadius * 2.0; // Larger radius for better smoothing
     const updates = [];
     
     for (const affected of affectedVertices) {
@@ -257,13 +271,14 @@ function smoothVertices(affectedVertices, allVertices) {
         let count = 0;
         let totalWeight = 0;
         
-        // Find all nearby vertices for averaging
+        // Find all nearby vertices for averaging (including the vertex itself for stability)
         for (const vertex of allVertices) {
             const otherPos = new THREE.Vector3(vertex.x, vertex.y, vertex.z);
             const distance = vertexPos.distanceTo(otherPos);
             
-            if (distance < smoothRadius && distance > 0) {
-                const weight = 1 - (distance / smoothRadius);
+            if (distance < smoothRadius) {
+                // Weight closer vertices more, but include self with full weight
+                const weight = distance === 0 ? 1.0 : (1 - (distance / smoothRadius)) * (1 - (distance / smoothRadius));
                 sumX += vertex.x * weight;
                 sumY += vertex.y * weight;
                 sumZ += vertex.z * weight;
@@ -272,12 +287,15 @@ function smoothVertices(affectedVertices, allVertices) {
             }
         }
         
-        if (count > 0 && totalWeight > 0) {
-            // Blend between current position and averaged position
-            const blendFactor = affected.influence * 0.3; // Smoothing strength
+        if (count > 1 && totalWeight > 0) { // Need at least 2 vertices (self + neighbor)
+            // Compute weighted average
             const avgX = sumX / totalWeight;
             const avgY = sumY / totalWeight;
             const avgZ = sumZ / totalWeight;
+            
+            // Blend factor: stronger smoothing (0.5 to 1.0 based on influence)
+            // This makes the smoothing much more noticeable
+            const blendFactor = Math.min(1.0, 0.5 + affected.influence * 0.5);
             
             const newX = affected.vertex.x * (1 - blendFactor) + avgX * blendFactor;
             const newY = affected.vertex.y * (1 - blendFactor) + avgY * blendFactor;
@@ -339,11 +357,13 @@ function onMouseMove(event) {
         
         if (intersects.length > 0) {
             const intersect = intersects[0];
-            const normal = intersect.face.normal.clone();
-            normal.transformDirection(clayMesh.matrixWorld);
+            // Use radial direction (from center to intersection point) for more reliable sculpting
+            // This ensures we always push/pull relative to the sphere center
+            const center = new THREE.Vector3(0, 0, 0);
+            const radialDirection = intersect.point.clone().sub(center).normalize();
             
             // Use the selected tool (add/subtract/smooth)
-            sculptAtPoint(intersect.point, normal, sculptStrength);
+            sculptAtPoint(intersect.point, radialDirection, sculptStrength);
         }
     }
     
