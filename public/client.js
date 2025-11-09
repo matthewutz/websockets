@@ -24,6 +24,7 @@ let canSculpt = true;
 const sessionStatusBanner = document.getElementById('session-status-banner');
 const sessionStatusText = document.getElementById('session-status-text');
 const sessionStatusTimer = document.getElementById('session-status-timer');
+const downloadButton = document.getElementById('download-btn');
 
 // Camera rotation
 let cameraAngleX = 0;
@@ -215,6 +216,11 @@ function handleSessionStatus(statusData) {
         if (toolIndicator) {
             toolIndicator.visible = false;
         }
+        if (downloadButton) {
+            downloadButton.disabled = false;
+        }
+    } else if (downloadButton) {
+        downloadButton.disabled = true;
     }
 
     startSessionStatusTimer();
@@ -241,9 +247,17 @@ function updateSessionStatusUI() {
     if (sessionStatus.status === 'break') {
         sessionStatusBanner.classList.add('break');
         sessionStatusText.textContent = 'Session status: Break';
+        if (downloadButton) {
+            downloadButton.disabled = false;
+            downloadButton.textContent = 'Download Sculpt (Available)';
+        }
     } else {
         sessionStatusBanner.classList.remove('break');
         sessionStatusText.textContent = 'Session status: Sculpting';
+        if (downloadButton) {
+            downloadButton.disabled = true;
+            downloadButton.textContent = 'Download Sculpt (Break Only)';
+        }
     }
 }
 
@@ -753,6 +767,12 @@ document.getElementById('reset-btn').addEventListener('click', async () => {
     }
 });
 
+if (downloadButton) {
+    downloadButton.addEventListener('click', () => {
+        downloadSculpt();
+    });
+}
+
 // Tool selection handlers
 document.querySelectorAll('.tool-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -774,6 +794,36 @@ function joinSession() {
 
 function updateUserCount() {
     document.getElementById('count').textContent = userCount;
+}
+
+async function downloadSculpt() {
+    if (!downloadButton || downloadButton.disabled) {
+        return;
+    }
+    try {
+        downloadButton.disabled = true;
+        downloadButton.textContent = 'Preparing download...';
+        const response = await fetch(`/api/session/${currentSessionId}/download`);
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(errorText || 'Download failed');
+        }
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `sculpt-${currentSessionId}-${timestamp}.json`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        window.URL.revokeObjectURL(url);
+    } catch (error) {
+        console.error('Download error:', error);
+        alert('Unable to download sculpt: ' + error.message);
+    } finally {
+        updateSessionStatusUI();
+    }
 }
 
 // Initialize on load

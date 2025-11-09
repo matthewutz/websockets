@@ -169,6 +169,28 @@ button:active {
     font-weight: 600;
 }
 
+#download-btn {
+    width: 100%;
+    padding: 10px 14px;
+    margin-bottom: 15px;
+    background: #2a2a2a;
+    border: 2px solid #4a9eff;
+    border-radius: 6px;
+    color: #cfe4ff;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.3s;
+}
+
+#download-btn:hover:not(:disabled) {
+    background: #3d4f6e;
+}
+
+#download-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
 #users-count {
     font-size: 14px;
     color: #aaa;

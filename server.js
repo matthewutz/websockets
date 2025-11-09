@@ -6,7 +6,7 @@ const path = require('path');
 const cors = require('cors');
 require('dotenv').config();
 
-const SCULPT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+const SCULPT_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 const BREAK_DURATION_MS = 60 * 1000; // 1 minute
 
 const app = express();
@@ -82,8 +82,11 @@ async function getClayState(sessionId) {
 async function updateClayState(sessionId, clayData) {
   try {
     await pool.query(
-      'UPDATE clay_sessions SET clay_data = $1, updated_at = CURRENT_TIMESTAMP WHERE session_id = $2',
-      [JSON.stringify(clayData), sessionId]
+      `INSERT INTO clay_sessions (session_id, clay_data, updated_at)
+       VALUES ($1, $2, CURRENT_TIMESTAMP)
+       ON CONFLICT (session_id)
+       DO UPDATE SET clay_data = $2, updated_at = CURRENT_TIMESTAMP`,
+      [sessionId, JSON.stringify(clayData)]
     );
   } catch (error) {
     console.error('Error updating clay state:', error);
@@ -132,6 +135,34 @@ function createDefaultClay() {
     indices,
     color: { r: 0.5, g: 0.5, b: 0.5 } // Grey color
   };
+}
+
+function clayStateToOBJ(clayState) {
+  if (!clayState) {
+    return '';
+  }
+
+  const vertices = clayState.vertices ?? [];
+  const indices = clayState.indices ?? [];
+  const lines = ['# Sculpt Export', '# Vertices'];
+
+  for (const vertex of vertices) {
+    if (Array.isArray(vertex)) {
+      lines.push(`v ${vertex[0]} ${vertex[1]} ${vertex[2]}`);
+    } else {
+      lines.push(`v ${vertex.x} ${vertex.y} ${vertex.z}`);
+    }
+  }
+
+  lines.push('# Faces');
+  for (let i = 0; i < indices.length; i += 3) {
+    const a = Number(indices[i]) + 1;
+    const b = Number(indices[i + 1]) + 1;
+    const c = Number(indices[i + 2]) + 1;
+    lines.push(`f ${a} ${b} ${c}`);
+  }
+
+  return `${lines.join('\n')}\n`;
 }
 
 // Store active sessions
@@ -242,6 +273,7 @@ function startBreak(sessionId) {
   clearSessionTimer(session);
   session.status = 'break';
   session.cycleStart = Date.now();
+  session.dbCleared = session.dbCleared ?? false;
 
   broadcastSessionStatus(sessionId);
   scheduleCycleTransition(sessionId);
@@ -260,8 +292,10 @@ async function resetSessionForNextCycle(sessionId) {
   session.lastSave = Date.now();
   session.status = 'sculpt';
   session.cycleStart = Date.now();
+  session.dbCleared = false;
 
   try {
+    await pool.query('DELETE FROM clay_sessions WHERE session_id = $1', [sessionId]);
     await updateClayState(sessionId, defaultState);
   } catch (error) {
     console.error('Error updating clay state during cycle reset:', error);
@@ -281,7 +315,8 @@ function ensureSessionEntry(sessionId, clayState) {
       lastSave: Date.now(),
       status: 'sculpt',
       cycleStart: Date.now(),
-      timer: null
+      timer: null,
+      dbCleared: false
     };
     activeSessions.set(sessionId, session);
     broadcastSessionStatus(sessionId);
@@ -293,6 +328,9 @@ function ensureSessionEntry(sessionId, clayState) {
     }
     if (!session.lastSave) {
       session.lastSave = Date.now();
+    }
+    if (session.dbCleared === undefined) {
+      session.dbCleared = false;
     }
   }
 
@@ -310,9 +348,15 @@ io.on('connection', (socket) => {
     socket.join(sessionId);
     
     // Load clay state from database
-    const clayState = await getClayState(sessionId);
+    let session = activeSessions.get(sessionId);
+    let clayState;
+    if (session) {
+      clayState = session.clayState;
+    } else {
+      clayState = await getClayState(sessionId);
+    }
     
-    const session = ensureSessionEntry(sessionId, clayState);
+    session = ensureSessionEntry(sessionId, clayState);
     
     // Send current state to the new user
     socket.emit('clay-state', session.clayState);
@@ -469,6 +513,48 @@ app.post('/api/session/:sessionId/reset', async (req, res) => {
   } catch (error) {
     console.error('Error resetting session:', error);
     res.status(500).json({ error: 'Failed to reset session' });
+  }
+});
+
+// API endpoint to download current session clay data (only during break)
+app.get('/api/session/:sessionId/download', async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    let session = activeSessions.get(sessionId);
+
+    if (!session) {
+      // Attempt to load from database if not in memory
+      const clayState = await getClayState(sessionId);
+      session = ensureSessionEntry(sessionId, clayState);
+    }
+
+    if (!session) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    if (session.status !== 'break') {
+      return res.status(400).json({ error: 'Model can only be downloaded during the break period' });
+    }
+
+    const filenameTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const objData = clayStateToOBJ(session.clayState ?? createDefaultClay());
+
+    if (!session.dbCleared) {
+      try {
+        await pool.query('DELETE FROM clay_sessions WHERE session_id = $1', [sessionId]);
+        session.dbCleared = true;
+      } catch (error) {
+        console.error('Error wiping clay state from database:', error);
+        // Proceed with download even if deletion fails
+      }
+    }
+
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Content-Disposition', `attachment; filename="sculpt-${sessionId}-${filenameTimestamp}.obj"`);
+    res.send(objData);
+  } catch (error) {
+    console.error('Error downloading session clay data:', error);
+    res.status(500).json({ error: 'Failed to download sculpt' });
   }
 });
 
