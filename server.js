@@ -180,9 +180,7 @@ function getSessionStatusPayload(session) {
     return null;
   }
   const now = Date.now();
-  const cycleDuration = session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS;
-  const elapsed = now - session.cycleStart;
-  const timeRemainingMs = Math.max(cycleDuration - elapsed, 0);
+  const timeRemainingMs = Math.max((session.nextTransitionAt ?? now) - now, 0);
   return {
     status: session.status,
     timeRemainingMs,
@@ -209,23 +207,35 @@ function sendSessionStatusToSocket(sessionId, socket) {
   socket.emit('session-status', payload);
 }
 
+function transitionSession(sessionId) {
+  const session = activeSessions.get(sessionId);
+  if (!session) {
+    return;
+  }
+
+  if (session.status === 'sculpt') {
+    startBreak(sessionId);
+  } else {
+    resetSessionForNextCycle(sessionId).catch((error) => {
+      console.error('Error resetting session for next cycle:', error);
+    });
+  }
+}
+
 function checkAndHandleCycleTransition(sessionId) {
   const session = activeSessions.get(sessionId);
   if (!session) {
     return false;
   }
 
-  const cycleDuration = session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS;
-  const elapsed = Date.now() - session.cycleStart;
+  const now = Date.now();
+  if (!session.nextTransitionAt) {
+    const duration = session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS;
+    session.nextTransitionAt = session.cycleStart + duration;
+  }
 
-  if (elapsed >= cycleDuration) {
-    if (session.status === 'sculpt') {
-      startBreak(sessionId);
-    } else {
-      resetSessionForNextCycle(sessionId).catch((error) => {
-        console.error('Error resetting session for next cycle:', error);
-      });
-    }
+  if (now >= session.nextTransitionAt) {
+    transitionSession(sessionId);
     return true;
   }
 
@@ -240,27 +250,15 @@ function scheduleCycleTransition(sessionId) {
 
   clearSessionTimer(session);
 
-  if (checkAndHandleCycleTransition(sessionId)) {
-    return;
+  const now = Date.now();
+  if (!session.nextTransitionAt) {
+    session.nextTransitionAt =
+      session.cycleStart + (session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS);
   }
-
-  const cycleDuration = session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS;
-  const elapsed = Date.now() - session.cycleStart;
-  const remaining = Math.max(cycleDuration - elapsed, 0);
+  const remaining = Math.max(session.nextTransitionAt - now, 0);
 
   session.timer = setTimeout(() => {
-    const currentSession = activeSessions.get(sessionId);
-    if (!currentSession) {
-      return;
-    }
-
-    if (currentSession.status === 'sculpt') {
-      startBreak(sessionId);
-    } else {
-      resetSessionForNextCycle(sessionId).catch((error) => {
-        console.error('Error resetting session for next cycle:', error);
-      });
-    }
+    transitionSession(sessionId);
   }, remaining);
 }
 
@@ -273,6 +271,7 @@ function startBreak(sessionId) {
   clearSessionTimer(session);
   session.status = 'break';
   session.cycleStart = Date.now();
+  session.nextTransitionAt = session.cycleStart + BREAK_DURATION_MS;
   session.dbCleared = session.dbCleared ?? false;
 
   broadcastSessionStatus(sessionId);
@@ -292,6 +291,7 @@ async function resetSessionForNextCycle(sessionId) {
   session.lastSave = Date.now();
   session.status = 'sculpt';
   session.cycleStart = Date.now();
+  session.nextTransitionAt = session.cycleStart + SCULPT_DURATION_MS;
   session.dbCleared = false;
 
   try {
@@ -315,6 +315,7 @@ function ensureSessionEntry(sessionId, clayState) {
       lastSave: Date.now(),
       status: 'sculpt',
       cycleStart: Date.now(),
+      nextTransitionAt: Date.now() + SCULPT_DURATION_MS,
       timer: null,
       dbCleared: false
     };
@@ -331,6 +332,10 @@ function ensureSessionEntry(sessionId, clayState) {
     }
     if (session.dbCleared === undefined) {
       session.dbCleared = false;
+    }
+    if (!session.nextTransitionAt) {
+      const duration = session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS;
+      session.nextTransitionAt = session.cycleStart + duration;
     }
   }
 
