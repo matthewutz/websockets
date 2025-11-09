@@ -140,6 +140,35 @@ button:active {
     color: #fff;
 }
 
+#session-status-banner {
+    margin-bottom: 15px;
+    padding: 12px;
+    border: 1px solid rgba(74, 158, 255, 0.6);
+    border-radius: 8px;
+    background: rgba(74, 158, 255, 0.12);
+    color: #cfe4ff;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 14px;
+}
+
+#session-status-banner.break {
+    border-color: rgba(255, 107, 107, 0.6);
+    background: rgba(255, 107, 107, 0.18);
+    color: #ffd7d7;
+}
+
+#session-status-text {
+    font-weight: 600;
+}
+
+#session-status-timer {
+    font-size: 20px;
+    font-weight: 600;
+}
+
 #users-count {
     font-size: 14px;
     color: #aaa;

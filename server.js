@@ -6,6 +6,9 @@ const path = require('path');
 const cors = require('cors');
 require('dotenv').config();
 
+const SCULPT_DURATION_MS = 15 * 60 * 1000; // 15 minutes
+const BREAK_DURATION_MS = 60 * 1000; // 1 minute
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -134,6 +137,171 @@ function createDefaultClay() {
 // Store active sessions
 const activeSessions = new Map();
 
+function clearSessionTimer(session) {
+  if (session?.timer) {
+    clearTimeout(session.timer);
+    session.timer = null;
+  }
+}
+
+function getSessionStatusPayload(session) {
+  if (!session) {
+    return null;
+  }
+  const now = Date.now();
+  const cycleDuration = session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS;
+  const elapsed = now - session.cycleStart;
+  const timeRemainingMs = Math.max(cycleDuration - elapsed, 0);
+  return {
+    status: session.status,
+    timeRemainingMs,
+    sculptDurationMs: SCULPT_DURATION_MS,
+    breakDurationMs: BREAK_DURATION_MS
+  };
+}
+
+function broadcastSessionStatus(sessionId) {
+  const session = activeSessions.get(sessionId);
+  const payload = getSessionStatusPayload(session);
+  if (!payload) {
+    return;
+  }
+  io.to(sessionId).emit('session-status', payload);
+}
+
+function sendSessionStatusToSocket(sessionId, socket) {
+  const session = activeSessions.get(sessionId);
+  const payload = getSessionStatusPayload(session);
+  if (!payload) {
+    return;
+  }
+  socket.emit('session-status', payload);
+}
+
+function checkAndHandleCycleTransition(sessionId) {
+  const session = activeSessions.get(sessionId);
+  if (!session) {
+    return false;
+  }
+
+  const cycleDuration = session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS;
+  const elapsed = Date.now() - session.cycleStart;
+
+  if (elapsed >= cycleDuration) {
+    if (session.status === 'sculpt') {
+      startBreak(sessionId);
+    } else {
+      resetSessionForNextCycle(sessionId).catch((error) => {
+        console.error('Error resetting session for next cycle:', error);
+      });
+    }
+    return true;
+  }
+
+  return false;
+}
+
+function scheduleCycleTransition(sessionId) {
+  const session = activeSessions.get(sessionId);
+  if (!session) {
+    return;
+  }
+
+  clearSessionTimer(session);
+
+  if (checkAndHandleCycleTransition(sessionId)) {
+    return;
+  }
+
+  const cycleDuration = session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS;
+  const elapsed = Date.now() - session.cycleStart;
+  const remaining = Math.max(cycleDuration - elapsed, 0);
+
+  session.timer = setTimeout(() => {
+    const currentSession = activeSessions.get(sessionId);
+    if (!currentSession) {
+      return;
+    }
+
+    if (currentSession.status === 'sculpt') {
+      startBreak(sessionId);
+    } else {
+      resetSessionForNextCycle(sessionId).catch((error) => {
+        console.error('Error resetting session for next cycle:', error);
+      });
+    }
+  }, remaining);
+}
+
+function startBreak(sessionId) {
+  const session = activeSessions.get(sessionId);
+  if (!session) {
+    return;
+  }
+
+  clearSessionTimer(session);
+  session.status = 'break';
+  session.cycleStart = Date.now();
+
+  broadcastSessionStatus(sessionId);
+  scheduleCycleTransition(sessionId);
+}
+
+async function resetSessionForNextCycle(sessionId) {
+  const session = activeSessions.get(sessionId);
+  if (!session) {
+    return;
+  }
+
+  clearSessionTimer(session);
+
+  const defaultState = createDefaultClay();
+  session.clayState = defaultState;
+  session.lastSave = Date.now();
+  session.status = 'sculpt';
+  session.cycleStart = Date.now();
+
+  try {
+    await updateClayState(sessionId, defaultState);
+  } catch (error) {
+    console.error('Error updating clay state during cycle reset:', error);
+  }
+
+  io.to(sessionId).emit('clay-state', defaultState);
+  broadcastSessionStatus(sessionId);
+  scheduleCycleTransition(sessionId);
+}
+
+function ensureSessionEntry(sessionId, clayState) {
+  let session = activeSessions.get(sessionId);
+
+  if (!session) {
+    session = {
+      clayState,
+      lastSave: Date.now(),
+      status: 'sculpt',
+      cycleStart: Date.now(),
+      timer: null
+    };
+    activeSessions.set(sessionId, session);
+    broadcastSessionStatus(sessionId);
+  } else {
+    session.clayState = clayState;
+    if (!session.status) {
+      session.status = 'sculpt';
+      session.cycleStart = Date.now();
+    }
+    if (!session.lastSave) {
+      session.lastSave = Date.now();
+    }
+  }
+
+  checkAndHandleCycleTransition(sessionId);
+  scheduleCycleTransition(sessionId);
+
+  return session;
+}
+
 // Socket.IO connection handling
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
@@ -144,16 +312,11 @@ io.on('connection', (socket) => {
     // Load clay state from database
     const clayState = await getClayState(sessionId);
     
-    // Store session if not exists
-    if (!activeSessions.has(sessionId)) {
-      activeSessions.set(sessionId, {
-        clayState,
-        lastSave: Date.now()
-      });
-    }
+    const session = ensureSessionEntry(sessionId, clayState);
     
     // Send current state to the new user
-    socket.emit('clay-state', activeSessions.get(sessionId).clayState);
+    socket.emit('clay-state', session.clayState);
+    sendSessionStatusToSocket(sessionId, socket);
     
     // Notify others in the session
     socket.to(sessionId).emit('user-joined', socket.id);
@@ -167,9 +330,19 @@ io.on('connection', (socket) => {
     if (!sessionId || vertexIndex === undefined || !position) {
       return;
     }
+
+    if (!activeSessions.has(sessionId)) {
+      return;
+    }
+
+    if (checkAndHandleCycleTransition(sessionId)) {
+      sendSessionStatusToSocket(sessionId, socket);
+      return;
+    }
     
     const session = activeSessions.get(sessionId);
-    if (!session) {
+    if (!session || session.status === 'break') {
+      sendSessionStatusToSocket(sessionId, socket);
       return;
     }
     
@@ -198,9 +371,19 @@ io.on('connection', (socket) => {
     if (!sessionId || !updates || !Array.isArray(updates)) {
       return;
     }
+
+    if (!activeSessions.has(sessionId)) {
+      return;
+    }
+
+    if (checkAndHandleCycleTransition(sessionId)) {
+      sendSessionStatusToSocket(sessionId, socket);
+      return;
+    }
     
     const session = activeSessions.get(sessionId);
-    if (!session) {
+    if (!session || session.status === 'break') {
+      sendSessionStatusToSocket(sessionId, socket);
       return;
     }
     
@@ -257,11 +440,27 @@ app.post('/api/session/:sessionId/reset', async (req, res) => {
       [sessionId, JSON.stringify(defaultState)]
     );
     
-    // Always update active session (create if doesn't exist)
-    activeSessions.set(sessionId, {
-      clayState: defaultState,
-      lastSave: Date.now()
-    });
+    // Update active session state and cycle
+    const session = activeSessions.get(sessionId);
+    if (session) {
+      clearSessionTimer(session);
+      session.clayState = defaultState;
+      session.lastSave = Date.now();
+      session.status = 'sculpt';
+      session.cycleStart = Date.now();
+      broadcastSessionStatus(sessionId);
+      scheduleCycleTransition(sessionId);
+    } else {
+      activeSessions.set(sessionId, {
+        clayState: defaultState,
+        lastSave: Date.now(),
+        status: 'sculpt',
+        cycleStart: Date.now(),
+        timer: null
+      });
+      broadcastSessionStatus(sessionId);
+      scheduleCycleTransition(sessionId);
+    }
     
     // Broadcast reset to all users in the session
     io.to(sessionId).emit('clay-state', defaultState);

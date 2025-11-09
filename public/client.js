@@ -15,6 +15,16 @@ const sculptStrength = 0.2; // Increased strength for more noticeable sculpting
 // Tool selection
 let currentTool = 'add'; // 'add', 'subtract', 'smooth'
 
+// Session status handling
+let sessionStatus = { status: 'sculpt', timeRemainingMs: 0 };
+let sessionStatusExpiry = Date.now();
+let sessionTimerInterval = null;
+let canSculpt = true;
+
+const sessionStatusBanner = document.getElementById('session-status-banner');
+const sessionStatusText = document.getElementById('session-status-text');
+const sessionStatusTimer = document.getElementById('session-status-timer');
+
 // Camera rotation
 let cameraAngleX = 0;
 let cameraAngleY = 0;
@@ -190,6 +200,58 @@ function createToolIndicator() {
     toolIndicator.visible = false;
     toolIndicator.renderOrder = 1; // Render on top
     scene.add(toolIndicator);
+}
+
+function handleSessionStatus(statusData) {
+    if (!statusData) return;
+
+    sessionStatus = statusData;
+    sessionStatusExpiry = Date.now() + (statusData.timeRemainingMs ?? 0);
+    canSculpt = statusData.status === 'sculpt';
+
+    if (!canSculpt) {
+        isSculpting = false;
+        document.body.style.cursor = 'default';
+        if (toolIndicator) {
+            toolIndicator.visible = false;
+        }
+    }
+
+    startSessionStatusTimer();
+}
+
+function startSessionStatusTimer() {
+    if (sessionTimerInterval) {
+        clearInterval(sessionTimerInterval);
+    }
+    updateSessionStatusUI();
+    sessionTimerInterval = setInterval(() => {
+        updateSessionStatusUI();
+    }, 1000);
+}
+
+function updateSessionStatusUI() {
+    if (!sessionStatusBanner || !sessionStatusText || !sessionStatusTimer) {
+        return;
+    }
+
+    const remainingMs = Math.max(sessionStatusExpiry - Date.now(), 0);
+    sessionStatusTimer.textContent = formatTime(remainingMs);
+
+    if (sessionStatus.status === 'break') {
+        sessionStatusBanner.classList.add('break');
+        sessionStatusText.textContent = 'Session status: Break';
+    } else {
+        sessionStatusBanner.classList.remove('break');
+        sessionStatusText.textContent = 'Session status: Sculpting';
+    }
+}
+
+function formatTime(ms) {
+    const totalSeconds = Math.max(Math.floor(ms / 1000), 0);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
 }
 
 // Update clay mesh from server state
@@ -492,6 +554,15 @@ function onMouseMove(event) {
         const intersects = raycaster.intersectObject(clayMesh);
         
         if (intersects.length > 0) {
+            if (!canSculpt) {
+                if (toolIndicator) {
+                    toolIndicator.visible = false;
+                }
+                lastMouseX = event.clientX;
+                lastMouseY = event.clientY;
+                return;
+            }
+
             const intersect = intersects[0];
             
             // Update tool indicator position and visibility
@@ -544,6 +615,10 @@ function onMouseDown(event) {
     // Left mouse button for sculpting
     if (event.button !== 0) return;
     
+    if (!canSculpt) {
+        return;
+    }
+    
     raycaster.setFromCamera(mouse, camera);
     const intersects = raycaster.intersectObject(clayMesh);
     
@@ -587,6 +662,10 @@ socket.on('disconnect', () => {
 socket.on('clay-state', (clayState) => {
     console.log('Received clay state from server');
     updateClayFromState(clayState);
+});
+
+socket.on('session-status', (statusData) => {
+    handleSessionStatus(statusData);
 });
 
 socket.on('vertex-update', (data) => {
@@ -698,6 +777,12 @@ function updateUserCount() {
 }
 
 // Initialize on load
+window.addEventListener('beforeunload', () => {
+    if (sessionTimerInterval) {
+        clearInterval(sessionTimerInterval);
+    }
+});
+
 window.addEventListener('load', () => {
     initScene();
 });
