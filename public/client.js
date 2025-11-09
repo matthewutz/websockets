@@ -138,10 +138,8 @@ function createDefaultClay() {
             const a = i * (segments + 1) + j;
             const b = a + segments + 1;
             
-            // First triangle - ensure counter-clockwise winding
-            indices.push(a, a + 1, b);
-            // Second triangle
-            indices.push(a + 1, b + 1, b);
+            indices.push(a, b, a + 1);
+            indices.push(a + 1, b, b + 1);
         }
     }
     
@@ -823,6 +821,7 @@ async function downloadSculpt() {
         alert('Unable to download sculpt: ' + error.message);
     } finally {
         updateSessionStatusUI();
+        startSessionStatusTimer();
     }
 }
 

@@ -126,7 +126,7 @@ function createDefaultClay() {
       const b = a + segments + 1;
       
       indices.push(a, b, a + 1);
-      indices.push(b, b + 1, a + 1);
+      indices.push(a + 1, b, b + 1);
     }
   }
   
@@ -301,6 +301,12 @@ async function resetSessionForNextCycle(sessionId) {
   session.cycleStart = Date.now();
   session.nextTransitionAt = session.cycleStart + SCULPT_DURATION_MS;
   session.dbCleared = false;
+  session.pendingSave = false;
+  if (session.saveTimeout) {
+    clearTimeout(session.saveTimeout);
+  }
+  session.saveTimeout = null;
+  session.cachedOBJ = null;
 
   try {
     await pool.query('DELETE FROM clay_sessions WHERE session_id = $1', [sessionId]);
@@ -327,7 +333,8 @@ function ensureSessionEntry(sessionId, clayState) {
       timer: null,
       dbCleared: false,
       saveTimeout: null,
-      pendingSave: false
+      pendingSave: false,
+      cachedOBJ: null
     };
     activeSessions.set(sessionId, session);
     broadcastSessionStatus(sessionId);
@@ -348,6 +355,9 @@ function ensureSessionEntry(sessionId, clayState) {
     }
     if (session.pendingSave === undefined) {
       session.pendingSave = false;
+    }
+    if (session.cachedOBJ === undefined) {
+      session.cachedOBJ = null;
     }
     if (!session.nextTransitionAt) {
       const duration = session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS;
@@ -374,6 +384,7 @@ async function persistSessionState(sessionId) {
       clearTimeout(session.saveTimeout);
       session.saveTimeout = null;
     }
+    session.cachedOBJ = clayStateToOBJ(session.clayState);
   } catch (error) {
     console.error('Error persisting clay state:', error);
   }
@@ -386,6 +397,7 @@ function scheduleSessionSave(sessionId, delayMs = 30000) {
   }
 
   session.pendingSave = true;
+  session.cachedOBJ = null;
 
   if (session.saveTimeout) {
     return;
@@ -592,21 +604,30 @@ app.get('/api/session/:sessionId/download', async (req, res) => {
     }
 
     const filenameTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const objData = clayStateToOBJ(session.clayState ?? createDefaultClay());
-
-    if (!session.dbCleared) {
-      try {
-        await pool.query('DELETE FROM clay_sessions WHERE session_id = $1', [sessionId]);
-        session.dbCleared = true;
-      } catch (error) {
-        console.error('Error wiping clay state from database:', error);
-        // Proceed with download even if deletion fails
-      }
+    if (!session.cachedOBJ) {
+      session.cachedOBJ = clayStateToOBJ(session.clayState ?? createDefaultClay());
     }
+
+    const objData = session.cachedOBJ;
+    const buffer = Buffer.from(objData, 'utf8');
 
     res.setHeader('Content-Type', 'model/obj');
     res.setHeader('Content-Disposition', `attachment; filename="sculpt-${sessionId}-${filenameTimestamp}.obj"`);
-    res.send(objData);
+    res.setHeader('Content-Length', buffer.length);
+
+    res.once('finish', () => {
+      if (!session.dbCleared) {
+        pool.query('DELETE FROM clay_sessions WHERE session_id = $1', [sessionId])
+          .then(() => {
+            session.dbCleared = true;
+          })
+          .catch((error) => {
+            console.error('Error wiping clay state from database:', error);
+          });
+      }
+    });
+
+    res.end(buffer);
   } catch (error) {
     console.error('Error downloading session clay data:', error);
     res.status(500).json({ error: 'Failed to download sculpt' });
