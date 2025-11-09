@@ -173,6 +173,10 @@ function clearSessionTimer(session) {
     clearTimeout(session.timer);
     session.timer = null;
   }
+  if (session?.saveTimeout) {
+    clearTimeout(session.saveTimeout);
+    session.saveTimeout = null;
+  }
 }
 
 function getSessionStatusPayload(session) {
@@ -207,18 +211,16 @@ function sendSessionStatusToSocket(sessionId, socket) {
   socket.emit('session-status', payload);
 }
 
-function transitionSession(sessionId) {
+async function transitionSession(sessionId) {
   const session = activeSessions.get(sessionId);
   if (!session) {
     return;
   }
 
   if (session.status === 'sculpt') {
-    startBreak(sessionId);
+    await startBreak(sessionId);
   } else {
-    resetSessionForNextCycle(sessionId).catch((error) => {
-      console.error('Error resetting session for next cycle:', error);
-    });
+    await resetSessionForNextCycle(sessionId);
   }
 }
 
@@ -235,7 +237,9 @@ function checkAndHandleCycleTransition(sessionId) {
   }
 
   if (now >= session.nextTransitionAt) {
-    transitionSession(sessionId);
+    transitionSession(sessionId).catch((error) => {
+      console.error('Error during session transition:', error);
+    });
     return true;
   }
 
@@ -258,17 +262,21 @@ function scheduleCycleTransition(sessionId) {
   const remaining = Math.max(session.nextTransitionAt - now, 0);
 
   session.timer = setTimeout(() => {
-    transitionSession(sessionId);
+    transitionSession(sessionId).catch((error) => {
+      console.error('Error during scheduled session transition:', error);
+    });
   }, remaining);
 }
 
-function startBreak(sessionId) {
+async function startBreak(sessionId) {
   const session = activeSessions.get(sessionId);
   if (!session) {
     return;
   }
 
   clearSessionTimer(session);
+  await persistSessionState(sessionId);
+  session.saveTimeout = null;
   session.status = 'break';
   session.cycleStart = Date.now();
   session.nextTransitionAt = session.cycleStart + BREAK_DURATION_MS;
@@ -317,7 +325,9 @@ function ensureSessionEntry(sessionId, clayState) {
       cycleStart: Date.now(),
       nextTransitionAt: Date.now() + SCULPT_DURATION_MS,
       timer: null,
-      dbCleared: false
+      dbCleared: false,
+      saveTimeout: null,
+      pendingSave: false
     };
     activeSessions.set(sessionId, session);
     broadcastSessionStatus(sessionId);
@@ -333,6 +343,12 @@ function ensureSessionEntry(sessionId, clayState) {
     if (session.dbCleared === undefined) {
       session.dbCleared = false;
     }
+    if (!session.saveTimeout) {
+      session.saveTimeout = null;
+    }
+    if (session.pendingSave === undefined) {
+      session.pendingSave = false;
+    }
     if (!session.nextTransitionAt) {
       const duration = session.status === 'sculpt' ? SCULPT_DURATION_MS : BREAK_DURATION_MS;
       session.nextTransitionAt = session.cycleStart + duration;
@@ -343,6 +359,42 @@ function ensureSessionEntry(sessionId, clayState) {
   scheduleCycleTransition(sessionId);
 
   return session;
+}
+
+async function persistSessionState(sessionId) {
+  const session = activeSessions.get(sessionId);
+  if (!session || !session.clayState) {
+    return;
+  }
+  try {
+    await updateClayState(sessionId, session.clayState);
+    session.pendingSave = false;
+    session.lastSave = Date.now();
+    if (session.saveTimeout) {
+      clearTimeout(session.saveTimeout);
+      session.saveTimeout = null;
+    }
+  } catch (error) {
+    console.error('Error persisting clay state:', error);
+  }
+}
+
+function scheduleSessionSave(sessionId, delayMs = 30000) {
+  const session = activeSessions.get(sessionId);
+  if (!session) {
+    return;
+  }
+
+  session.pendingSave = true;
+
+  if (session.saveTimeout) {
+    return;
+  }
+
+  session.saveTimeout = setTimeout(async () => {
+    session.saveTimeout = null;
+    await persistSessionState(sessionId);
+  }, delayMs);
 }
 
 // Socket.IO connection handling
@@ -405,12 +457,7 @@ io.on('connection', (socket) => {
         position
       });
       
-      // Save to database periodically (every 2 seconds) to avoid excessive writes
-      const now = Date.now();
-      if (now - session.lastSave > 2000) {
-        await updateClayState(sessionId, session.clayState);
-        session.lastSave = now;
-      }
+      scheduleSessionSave(sessionId);
     }
   });
   
@@ -449,12 +496,7 @@ io.on('connection', (socket) => {
       updates: updates
     });
     
-    // Save to database periodically
-    const now = Date.now();
-    if (now - session.lastSave > 2000) {
-      await updateClayState(sessionId, session.clayState);
-      session.lastSave = now;
-    }
+    scheduleSessionSave(sessionId);
   });
   
   socket.on('disconnect', () => {
@@ -497,6 +539,10 @@ app.post('/api/session/:sessionId/reset', async (req, res) => {
       session.lastSave = Date.now();
       session.status = 'sculpt';
       session.cycleStart = Date.now();
+      session.nextTransitionAt = session.cycleStart + SCULPT_DURATION_MS;
+      session.dbCleared = false;
+      session.pendingSave = false;
+      session.saveTimeout = null;
       broadcastSessionStatus(sessionId);
       scheduleCycleTransition(sessionId);
     } else {
@@ -505,7 +551,11 @@ app.post('/api/session/:sessionId/reset', async (req, res) => {
         lastSave: Date.now(),
         status: 'sculpt',
         cycleStart: Date.now(),
-        timer: null
+        nextTransitionAt: Date.now() + SCULPT_DURATION_MS,
+        timer: null,
+        dbCleared: false,
+        saveTimeout: null,
+        pendingSave: false
       });
       broadcastSessionStatus(sessionId);
       scheduleCycleTransition(sessionId);
@@ -554,7 +604,7 @@ app.get('/api/session/:sessionId/download', async (req, res) => {
       }
     }
 
-    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Content-Type', 'model/obj');
     res.setHeader('Content-Disposition', `attachment; filename="sculpt-${sessionId}-${filenameTimestamp}.obj"`);
     res.send(objData);
   } catch (error) {
