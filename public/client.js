@@ -813,7 +813,7 @@ async function downloadSculpt() {
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
         const anchor = document.createElement('a');
         anchor.href = url;
-        anchor.download = `sculpt-${currentSessionId}-${timestamp}.json`;
+        anchor.download = `sculpt-${currentSessionId}-${timestamp}.obj`;
         document.body.appendChild(anchor);
         anchor.click();
         document.body.removeChild(anchor);
